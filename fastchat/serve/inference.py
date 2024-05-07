@@ -562,7 +562,8 @@ def chat_loop(
         }
 
         try:
-            chatio.prompt_for_output(conv.roles[1])
+            if local_rank == 0:
+                chatio.prompt_for_output(conv.roles[1])
             output_stream = generate_stream_func(
                 model,
                 tokenizer,
@@ -573,24 +574,13 @@ def chat_loop(
             )
             t = time.time()
             
-            outputs = chatio.stream_output(output_stream)
-            
-            # if is_ipex and world_size > 1:
-            #     # Broadcast the input to other ranks
-            #     if local_rank == 0:
-            #         outp_tensor = torch.tensor(bytearray(outputs, 'utf-8'), dtype=torch.uint8).to(device)
-            #         outp_size = torch.tensor(outp_tensor.size()[0])
-            #     else:
-            #         outp_size = torch.tensor(1)
-            #     # Broadcast the input to other ranks
-            #     dist.barrier()
-            #     dist.broadcast(outp_size, src=0)
-            #     if local_rank != 0:
-            #         outp_tensor = torch.empty(outp_size, dtype=torch.uint8, device=device) 
-            #     dist.broadcast(outp_tensor, src=0) 
-            #     if local_rank != 0:
-            #         outputs = outp_tensor.cpu().numpy().tobytes().decode('utf-8')
-                
+            if local_rank == 0:
+                outputs = chatio.stream_output(output_stream)
+            else:
+                outputs = ""
+                for o in output_stream:  
+                    outputs = o["text"]
+
             duration = time.time() - t
             conv.update_last_message(outputs.strip())
 

@@ -15,11 +15,6 @@ def get_int_from_env(env_keys, default):
 
 local_rank = get_int_from_env(["LOCAL_RANK", "MPI_LOCALRANKID"], 0)
 world_size = get_int_from_env(["WORLD_SIZE", "PMI_SIZE"], 1)
-
-def print_rank0(*msg):
-    if local_rank != 0:
-        return
-    print(*msg)
     
 @torch.inference_mode()
 def generate_stream_ipex(
@@ -42,20 +37,28 @@ def generate_stream_ipex(
     inputs = tokenizer(
         prompt, return_tensors="pt", padding=model.config.padding
     ).input_ids
-    print(f"===={local_rank}=={prompt}: {inputs}====")
     input_echo_len = len(inputs[0])
     max_len = max_new_tokens + input_echo_len
 
     decode_config = dict(skip_special_tokens=True, clean_up_tokenization_spaces=True)
     streamer = TextIteratorStreamer(tokenizer, skip_prompt=True, **decode_config)
+        
+    generate_kwargs = dict(
+        do_sample=True, 
+        temperature=temperature, 
+        num_beams=model.config.num_beams,
+        num_return_sequences=model.config.num_return_sequences, 
+        early_stopping=model.config.early_stopping,
+        max_length=max_len, 
+        length_penalty=repetition_penalty, 
+        # eos_token_id=model.config.eos_token_id,
+        # pad_token_id=model.config.pad_token_id,
+        streamer=streamer
+    )
 
-    generate_kwargs = dict(do_sample=True, temperature=temperature, num_beams=model.config.num_beams, 
-                           num_return_sequences=model.config.num_return_sequences, early_stopping=model.config.early_stopping,
-                           max_length=max_len, length_penalty=repetition_penalty, streamer=streamer)
     if re.search("t5", model.model.config.architectures[0], re.IGNORECASE):
         generate_kwargs["max_length"] = generate_kwargs["max_new_tokens"]
         generate_kwargs.pop("max_new_tokens")
-    print_rank0(f"Generate args {generate_kwargs}")
     
     with torch.inference_mode(), torch.no_grad(), torch.cpu.amp.autocast(
         enabled=True
@@ -64,12 +67,6 @@ def generate_stream_ipex(
         generate_kwargs["input_ids"] = input_ids
         thread = Thread(target=model.model.generate, kwargs=generate_kwargs)
         thread.start()
-        # output = model.model.generate(input_ids, **generate_kwargs)
-        # gen_ids = output[0] if True else output
-        # gen_text = tokenizer.batch_decode(gen_ids, skip_special_tokens=True)
-
-        # print(gen_text, total_new_tokens, flush=True)
-        # print_rank0(f"{gen_text}")
         if echo:
             # means keep the prompt
             output = prompt
