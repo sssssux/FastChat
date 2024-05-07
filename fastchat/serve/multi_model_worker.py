@@ -56,6 +56,7 @@ from fastchat.model.model_codet5p import generate_stream_codet5p
 from fastchat.modules.gptq import GptqConfig
 from fastchat.modules.exllama import ExllamaConfig
 from fastchat.modules.xfastertransformer import XftConfig
+from fastchat.modules.ipex import IpexConfig
 from fastchat.serve.inference import generate_stream
 from fastchat.serve.model_worker import ModelWorker, worker_id, logger
 from fastchat.utils import build_logger, pretty_print_semaphore, get_context_length
@@ -231,7 +232,21 @@ def create_multi_model_worker():
             args.device = "cpu"
     else:
         xft_config = None
-
+    if args.ipex or args.ipex_weight_only_quantization:
+        ipex_config = IpexConfig(
+            max_length=args.ipex_max_len,
+            data_type=args.ipex_dtype,
+            weight_only_quantization=args.ipex_weight_only_quantization,
+            weight_dtype=args.ipex_weight_dtype,
+            lowp_mode=args.ipex_lowp_mode,
+            local_rank=args.local_rank
+        )
+        if args.device != "cpu":
+            print("IPEX now is only support CPUs. Reset device to CPU")
+            args.device = "cpu"
+    else:
+        ipex_config = None
+        
     if args.model_names is None:
         args.model_names = [[x.split("/")[-1]] for x in args.model_path]
 
@@ -261,6 +276,7 @@ def create_multi_model_worker():
             gptq_config=gptq_config,
             exllama_config=exllama_config,
             xft_config=xft_config,
+            ipex_config=ipex_config,
             stream_interval=args.stream_interval,
             conv_template=conv_template,
         )

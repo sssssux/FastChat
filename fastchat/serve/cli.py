@@ -26,12 +26,11 @@ from prompt_toolkit.key_binding import KeyBindings
 from rich.console import Console
 from rich.live import Live
 from rich.markdown import Markdown
-import torch
-
 from fastchat.model.model_adapter import add_model_args
 from fastchat.modules.awq import AWQConfig
 from fastchat.modules.exllama import ExllamaConfig
 from fastchat.modules.xfastertransformer import XftConfig
+from fastchat.modules.ipex import IpexConfig
 from fastchat.modules.gptq import GptqConfig
 from fastchat.serve.inference import ChatIO, chat_loop
 from fastchat.utils import str_to_torch_dtype
@@ -215,6 +214,22 @@ def main(args):
             args.device = "cpu"
     else:
         xft_config = None
+    if args.ipex or args.ipex_weight_only_quantization:
+        import deepspeed
+
+        ipex_config = IpexConfig(
+            max_length=args.ipex_max_len,
+            data_type=args.ipex_dtype,
+            weight_only_quantization=args.ipex_weight_only_quantization,
+            weight_dtype=args.ipex_weight_dtype,
+            lowp_mode=args.ipex_lowp_mode,
+            local_rank=args.local_rank
+        )
+        if args.device != "cpu":
+            print("IPEX now is only support CPUs. Reset device to CPU")
+            args.device = "cpu"
+    else:
+        ipex_config = None
     if args.style == "simple":
         chatio = SimpleChatIO(args.multiline)
     elif args.style == "rich":
@@ -251,6 +266,7 @@ def main(args):
             ),
             exllama_config=exllama_config,
             xft_config=xft_config,
+            ipex_config=ipex_config,
             revision=args.revision,
             judge_sent_end=args.judge_sent_end,
             debug=args.debug,

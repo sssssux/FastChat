@@ -23,6 +23,7 @@ from fastchat.model.model_adapter import (
 from fastchat.modules.awq import AWQConfig
 from fastchat.modules.exllama import ExllamaConfig
 from fastchat.modules.xfastertransformer import XftConfig
+from fastchat.modules.ipex import IpexConfig
 from fastchat.modules.gptq import GptqConfig
 from fastchat.serve.base_model_worker import BaseModelWorker, app
 from fastchat.utils import (
@@ -56,6 +57,7 @@ class ModelWorker(BaseModelWorker):
         awq_config: Optional[AWQConfig] = None,
         exllama_config: Optional[ExllamaConfig] = None,
         xft_config: Optional[XftConfig] = None,
+        ipex_config: Optional[IpexConfig] = None,
         stream_interval: int = 2,
         conv_template: Optional[str] = None,
         embed_in_truncate: bool = False,
@@ -87,6 +89,7 @@ class ModelWorker(BaseModelWorker):
             awq_config=awq_config,
             exllama_config=exllama_config,
             xft_config=xft_config,
+            ipex_config=ipex_config,
             debug=debug,
         )
         self.device = device
@@ -381,7 +384,21 @@ def create_model_worker():
             args.device = "cpu"
     else:
         xft_config = None
-
+    if args.ipex or args.ipex_weight_only_quantization:
+        ipex_config = IpexConfig(
+            max_length=args.ipex_max_len,
+            data_type=args.ipex_dtype,
+            weight_only_quantization=args.ipex_weight_only_quantization,
+            weight_dtype=args.ipex_weight_dtype,
+            lowp_mode=args.ipex_lowp_mode,
+            local_rank=args.local_rank
+        )
+        if args.device != "cpu":
+            print("IPEX now is only support CPUs. Reset device to CPU")
+            args.device = "cpu"
+    else:
+        ipex_config = None
+        
     worker = ModelWorker(
         args.controller_address,
         args.worker_address,
@@ -401,6 +418,7 @@ def create_model_worker():
         awq_config=awq_config,
         exllama_config=exllama_config,
         xft_config=xft_config,
+        ipex_config=ipex_config,
         stream_interval=args.stream_interval,
         conv_template=args.conv_template,
         embed_in_truncate=args.embed_in_truncate,

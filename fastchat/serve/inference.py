@@ -39,6 +39,7 @@ from fastchat.modules.awq import AWQConfig
 from fastchat.modules.gptq import GptqConfig
 from fastchat.modules.exllama import ExllamaConfig
 from fastchat.modules.xfastertransformer import XftConfig
+from fastchat.modules.ipex import IpexConfig
 from fastchat.utils import is_partial_stop, is_sentence_complete, get_context_length
 
 
@@ -352,6 +353,7 @@ def chat_loop(
     awq_config: Optional[AWQConfig] = None,
     exllama_config: Optional[ExllamaConfig] = None,
     xft_config: Optional[XftConfig] = None,
+    ipex_config: Optional[IpexConfig] = None,
     revision: str = "main",
     judge_sent_end: bool = True,
     debug: bool = True,
@@ -370,15 +372,35 @@ def chat_loop(
         awq_config=awq_config,
         exllama_config=exllama_config,
         xft_config=xft_config,
+        ipex_config=ipex_config,
         revision=revision,
         debug=debug,
     )
     generate_stream_func = get_generate_stream_function(model, model_path)
-
+            
     model_type = str(type(model)).lower()
     is_t5 = "t5" in model_type
     is_codet5p = "codet5p" in model_type
     is_xft = "xft" in model_type
+    is_ipex = "ipex" in model_type.lower()
+    
+    def get_int_from_env(env_keys, default):
+        """Returns the first positive env value found in the `env_keys` list or the default."""
+        for e in env_keys:
+            val = int(os.environ.get(e, -1))
+            if val >= 0:
+                return val
+        return default
+    
+    def print_rank0(*msg):
+        if local_rank != 0:
+            return
+        print(*msg)
+    
+    local_rank = get_int_from_env(["LOCAL_RANK", "MPI_LOCALRANKID"], 0)
+    world_size = get_int_from_env(["WORLD_SIZE", "PMI_SIZE"], 1)
+    if is_ipex and world_size > 1:
+        import deepspeed.comm as dist
 
     # Hardcode T5's default repetition penalty to be 1.2
     if is_t5 and repetition_penalty == 1.0:
@@ -411,11 +433,32 @@ def chat_loop(
         if not history or not conv:
             conv = new_chat()
 
-        try:
-            inp = chatio.prompt_for_input(conv.roles[0])
-        except EOFError:
-            inp = ""
-
+        inp = None
+        if local_rank == 0:
+            # Only rank 0 interacts with the user
+            try:
+                inp = chatio.prompt_for_input("user")
+            except EOFError:
+                inp = ""
+        
+        if is_ipex and world_size > 1:
+            # Broadcast the input to other ranks
+            if local_rank == 0:
+                inp_tensor = torch.tensor(bytearray(inp, 'utf-8'), dtype=torch.uint8).to(device)
+                inp_size = torch.tensor(inp_tensor.size()[0])
+            else:
+                inp_size = torch.tensor(1)
+                # inp_tensor = torch.empty(ipex_config.max_length, dtype=torch.int64, device=device) 
+            # Broadcast the input to other ranks
+            dist.barrier()
+            dist.broadcast(inp_size, src=0)
+            if local_rank != 0:
+                inp_tensor = torch.empty(inp_size, dtype=torch.uint8, device=device) 
+            dist.broadcast(inp_tensor, src=0) 
+            if local_rank != 0:
+                inp = inp_tensor.cpu().numpy().tobytes().decode('utf-8')
+            dist.barrier()
+                
         if inp == "!!exit" or not inp:
             print("exit...")
             break
@@ -529,7 +572,25 @@ def chat_loop(
                 judge_sent_end=judge_sent_end,
             )
             t = time.time()
+            
             outputs = chatio.stream_output(output_stream)
+            
+            # if is_ipex and world_size > 1:
+            #     # Broadcast the input to other ranks
+            #     if local_rank == 0:
+            #         outp_tensor = torch.tensor(bytearray(outputs, 'utf-8'), dtype=torch.uint8).to(device)
+            #         outp_size = torch.tensor(outp_tensor.size()[0])
+            #     else:
+            #         outp_size = torch.tensor(1)
+            #     # Broadcast the input to other ranks
+            #     dist.barrier()
+            #     dist.broadcast(outp_size, src=0)
+            #     if local_rank != 0:
+            #         outp_tensor = torch.empty(outp_size, dtype=torch.uint8, device=device) 
+            #     dist.broadcast(outp_tensor, src=0) 
+            #     if local_rank != 0:
+            #         outputs = outp_tensor.cpu().numpy().tobytes().decode('utf-8')
+                
             duration = time.time() - t
             conv.update_last_message(outputs.strip())
 

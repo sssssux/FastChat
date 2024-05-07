@@ -35,6 +35,8 @@ from fastchat.model.model_falcon import generate_stream_falcon
 from fastchat.model.model_yuan2 import generate_stream_yuan2
 from fastchat.model.model_exllama import generate_stream_exllama
 from fastchat.model.model_xfastertransformer import generate_stream_xft
+from fastchat.model.model_ipex import generate_stream_ipex
+
 from fastchat.model.model_cllm import generate_stream_cllm
 
 from fastchat.model.monkey_patch_non_inplace import (
@@ -43,6 +45,8 @@ from fastchat.model.monkey_patch_non_inplace import (
 from fastchat.modules.awq import AWQConfig, load_awq_quantized
 from fastchat.modules.exllama import ExllamaConfig, load_exllama_model
 from fastchat.modules.xfastertransformer import load_xft_model, XftConfig
+from fastchat.modules.ipex import load_ipex_model, IpexConfig
+
 from fastchat.modules.gptq import GptqConfig, load_gptq_quantized
 from fastchat.utils import get_gpu_memory
 
@@ -199,6 +203,7 @@ def load_model(
     awq_config: Optional[AWQConfig] = None,
     exllama_config: Optional[ExllamaConfig] = None,
     xft_config: Optional[XftConfig] = None,
+    ipex_config: Optional[IpexConfig] = None,
     revision: str = "main",
     debug: bool = False,
 ):
@@ -339,6 +344,9 @@ def load_model(
     elif xft_config:
         model, tokenizer = load_xft_model(model_path, xft_config)
         return model, tokenizer
+    elif ipex_config:
+        model, tokenizer = load_ipex_model(model_path, ipex_config)
+        return model, tokenizer
     kwargs["revision"] = revision
 
     if dtype is not None:  # Overwrite dtype if it is provided in the arguments.
@@ -361,12 +369,12 @@ def load_model(
     # Load model
     model, tokenizer = adapter.load_model(model_path, kwargs)
 
-    if (
-        device == "cpu"
-        and kwargs["torch_dtype"] is torch.bfloat16
-        and CPU_ISA is not None
-    ):
-        model = ipex.optimize(model, dtype=kwargs["torch_dtype"])
+    # if (
+    #     device == "cpu"
+    #     and kwargs["torch_dtype"] is torch.bfloat16
+    #     and CPU_ISA is not None
+    # ):
+    #     model = ipex.optimize(model, dtype=kwargs["torch_dtype"])
 
     if (device == "cuda" and num_gpus == 1 and not cpu_offloading) or device in (
         "mps",
@@ -401,6 +409,7 @@ def get_generate_stream_function(model: torch.nn.Module, model_path: str):
     is_codet5p = "codet5p" in model_type
     is_exllama = "exllama" in model_type
     is_xft = "xft" in model_type
+    is_ipex = "ipex" in model_type.lower()
     is_yuan = "yuan" in model_type
     is_cllm = "consistency-llm" in model_path.lower()
 
@@ -414,6 +423,8 @@ def get_generate_stream_function(model: torch.nn.Module, model_path: str):
         return generate_stream_exllama
     elif is_xft:
         return generate_stream_xft
+    elif is_ipex:
+        return generate_stream_ipex
     elif is_yuan:
         return generate_stream_yuan2
     elif is_cllm:
@@ -440,6 +451,7 @@ def get_generate_stream_function(model: torch.nn.Module, model_path: str):
             is_codet5p = "codet5p" in base_model_type
             is_exllama = "exllama" in base_model_type
             is_xft = "xft" in base_model_type
+            is_ipex = "ipex" in base_model_type.lower()
             is_yuan = "yuan" in base_model_type
             is_cllm = "consistency-llm" in model_path.lower()
 
@@ -454,6 +466,8 @@ def get_generate_stream_function(model: torch.nn.Module, model_path: str):
                 generate_stream_function = generate_stream_exllama
             elif is_xft:
                 generate_stream_function = generate_stream_xft
+            elif is_ipex:
+                generate_stream_function = generate_stream_ipex
             elif is_yuan:
                 generate_stream_function = generate_stream_yuan2
             elif is_cllm:
@@ -603,6 +617,53 @@ def add_model_args(parser):
         choices=["fp16", "bf16", "int8", "bf16_fp16", "bf16_int8"],
         help="Override the default dtype. If not set, it will use bfloat16 for first token and float16 next tokens on CPU.",
         default=None,
+    )
+    parser.add_argument(
+        "--ipex",
+        action="store_true",
+        help="Used for Intel-Extension-for-Pytorch(IPEX). Enable IPEX inference framework.",
+    )
+    parser.add_argument(
+        "--ipex-max-len",
+        type=int,
+        default=4096,
+        help="Used for Intel-Extension-for-Pytorch(IPEX). Max sequence length to use for IPEX framework; default 4096 sequence length.",
+    )
+    parser.add_argument(
+        "--ipex-dtype",
+        type=str,
+        choices=["bfloat16", "float32", "int8"],
+        help="Used for Intel-Extension-for-Pytorch(IPEX). If not set, it will use bfloat16 for inference.",
+        default="bfloat16",
+    )
+    parser.add_argument(
+        "--ipex-weight-only-quantization",
+        action="store_true",
+        help="Used for Intel-Extension-for-Pytorch(IPEX). Enable ipex weight-only quantization",
+    )
+    parser.add_argument(
+        "--ipex-weight-dtype",
+        choices=["INT8", "INT4", "NF4"],
+        default="INT8",
+        type=str,
+        help="Used for Intel-Extension-for-Pytorch(IPEX). Weight data type for weight only quantization. Unrelated to activation data type or lowp-mode.",
+    )
+    parser.add_argument(
+        "--ipex-lowp-mode",
+        choices=["AUTO", "BF16", "FP32", "INT8", "FP16"],
+        default="AUTO",
+        type=str,
+        help="Used for Intel-Extension-for-Pytorch(IPEX). low precision mode for weight only quantization. "
+            "It indicates data type for computation for speedup at the cost "
+            "of accuracy. Unrelated to activation or weight data type."
+            "It is not supported yet to use lowp_mode=INT8 for INT8 weight, "
+            "falling back to lowp_mode=BF16 implicitly in this case."
+            "If set to AUTO, lowp_mode is determined by weight data type: "
+            "lowp_mode=BF16 is used for INT8 weight "
+            "and lowp_mode=INT8 used for INT4 weight",
+    )
+    parser.add_argument(
+        "--local_rank", required=False, type=int, help="used by dist launchers"
     )
 
 
